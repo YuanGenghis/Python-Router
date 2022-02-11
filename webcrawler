@@ -1,0 +1,184 @@
+#!/usr/bin/env python3
+
+import sys
+import socket
+import json
+import queue
+import zlib
+import time
+import re
+from urllib.parse import urlparse
+from html.parser import HTMLParser
+from time import sleep
+from collections import deque
+
+HOST = "www.3700.network"
+PORT = 80
+USERNAME = sys.argv[1] # "1848855"
+PASSWORD = sys.argv[2] # "R8GFT6DH"
+
+VERSION = "HTTP/1.1"
+GET = "GET"
+POST = "POST"
+ROOT = "/fakebook/"
+LOGIN = "/accounts/login/?next=/fakebook/"
+FLAG = "class='secret_flag' style=\"color:red\">FLAG:"
+
+
+server_address = (HOST, PORT)
+
+global sock 
+sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+sock.settimeout(50)
+sock.connect(server_address)
+
+#receive the entire data from the client
+def receiveAll(sock):
+  result = ''
+  while 1:
+    b_data = sock.recv(1024)
+    data = b_data.decode()
+    result += data
+    #print(result)
+    if '0\r\n' in data:
+        break
+
+  return result
+
+
+
+# send HEAD message
+CRLF = "\r\n"
+initial_request_line = "HEAD /accounts/login/?next=/fakebook/" + " HTTP/1.1" + CRLF
+headers = {}
+headers['Host'] = "www.3700.network"
+headers['User-Agent'] = "Python App"
+headers['Accept'] = "text/html,application/xhtml+xml,application/xml"
+headers['Cache-Control'] = "no-cache"
+headers['Connection'] = 'keep-alive'
+
+request_string = initial_request_line
+for (key, value) in headers.items():
+    request_string += key + ": " + value + CRLF
+x = request_string + CRLF
+#print(x)
+sock.sendall(x.encode())
+header_response = receiveAll(sock)
+print(header_response)
+
+#extract the csrf and sessionid for login
+token_start = header_response.find('csrftoken=') + 10
+csrf = header_response[token_start:token_start + 32]
+
+id_start = header_response.find('sessionid=') + 10
+sessionid = header_response[id_start:id_start + 32]
+#print(csrf, "\n", sessionid, "\n")
+
+post_header = POST + " " + LOGIN + " " + VERSION + "\r\nHost: %s\r\nCookie: " % HOST
+get_header = GET + " " + ROOT + " " + VERSION + "\r\nHost: %s\r\nCookie: " % HOST
+#post request to login
+form_entry = "username=" + USERNAME + "&password=" + PASSWORD + "&csrfmiddlewaretoken=" \
+              + csrf + "&next=%2Ffakebook%2F"
+content_length = "\r\nContent-Length: " + str(len(form_entry)) + "\r\n\r\n"
+post = post_header + "csrftoken=" + csrf + "; sessionid=" + sessionid + "\r\nConnection: keep-alive" + content_length + form_entry
+
+print(post)
+sock.sendall(post.encode())
+
+post_response = receiveAll(sock)
+print("post_response:\n", post_response)
+
+#print("response:\n", response1)
+
+
+#modify the sessionid to new id after post method
+id_start = post_response.find('sessionid=') + 10
+sessionid = post_response[id_start:id_start + 32]
+
+
+
+def Get(path):
+  get_request = "GET " + path + " HTTP/1.1\r\nHost: " + HOST + "\r\nCookie: csrftoken=" + csrf \
+            + "; sessionid=" + sessionid + "\r\nConnection: close\r\n\r\n"
+  print(get_request)
+  global sock
+  sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+  sock.connect(server_address)
+  sock.sendall(get_request.encode())
+  response = receiveAll(sock)
+  if len(response) < 10:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.connect(server_address)
+    return Get(path)
+  if "<html>" in response:
+    while "</html>" not in response:
+      response += receiveAll(sock)
+#   print("\neachres:", response)
+  return response
+
+login_response = Get("/fakebook/")
+# print("login_response:\n", login_response)
+
+visited = []
+tovisit = deque()
+secret_flags = []
+
+
+def getResponseCode(response):
+  if "200 OK" in response:
+    return 200
+  elif "301 MOVED PERMANENTLY" in response:
+    return 301
+  elif "302 FOUND" in response:
+    return 302
+  elif "403 FORBIDDEN" in response:
+    return 403
+  elif "404 NOT FOUND" in response:
+    return 404
+  elif "500 INTERNAL SERVER ERROR" in response:
+    return 500
+  else:
+    raise ValueError("Other Response: " + response)
+
+
+visited.append("/fakebook/")
+visited.append("/fakebook")
+tovisit.append("/fakebook/")
+    
+
+while len(tovisit) > 0:
+  path = tovisit[0]
+  response = Get(path)
+  responseCode = getResponseCode(response)
+
+  if responseCode == 200:
+  # parse url paths from response and add to pathsToVisit
+    urls = set(re.findall(r'href=[\'"]?(/fakebook/[^\'" >]+)', response))
+    for url in urls:
+      # If the URL is not already visited and not already queued
+      if url not in visited and url not in tovisit:
+        # Append to the queue
+        tovisit.append(url)
+    if "FLAG" in response:
+      flags = re.findall(r'FLAG: ([^\'\" ><]+)', response)
+      for flag in flags:
+        print("I am here", flag)
+        secret_flags.append(flag)
+    tovisit.popleft()  # remove from queue
+    visited.append(path)  # add to visited
+    if len(secret_flags) == 5:
+      for flag in secret_flags:
+        print
+        flag
+      sys.exit(0)
+    print("flagsfound:" ,len(secret_flags))
+  elif responseCode == 301 or responseCode == 302:
+    tovisit.popleft()  # remove from queue
+  elif responseCode == 403 or responseCode == 404:
+    tovisit.popleft()  # remove from queue
+  elif responseCode == 500:
+    continue  # retry the link
+
+print("finished")
+
+
